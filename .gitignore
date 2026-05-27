@@ -1,0 +1,11 @@
+.cache/
+.vscode/
+.vs/
+build/
+out/
+.buildstats
+.clang-format
+_deps/
+.cmake/
+
+*.exe

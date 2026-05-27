@@ -1,0 +1,61 @@
+{
+    "version": 3,
+    "configurePresets": [
+        {
+            "name": "release",
+            "displayName": "Release",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build",
+            "cacheVariables": {
+                "USE_CRT": "OFF",
+                "SHOW_CONSOLE": "OFF",
+                "CMAKE_C_COMPILER": "clang-cl",
+                "CMAKE_CXX_COMPILER": "clang-cl",
+                "CMAKE_LINKER": "lld-link",
+                "CMAKE_BUILD_TYPE": "Release"
+            }
+        },
+        {
+            "name": "debug",
+            "displayName": "Debug",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build",
+            "cacheVariables": {
+                "USE_CRT": "OFF",
+                "SHOW_CONSOLE": "ON",
+                "CMAKE_C_COMPILER": "clang-cl",
+                "CMAKE_CXX_COMPILER": "clang-cl",
+                "CMAKE_LINKER": "lld-link",
+                "CMAKE_BUILD_TYPE": "Debug"
+            }
+        },
+        {
+            "name": "debug-crt",
+            "displayName": "Debug CRT",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build",
+            "cacheVariables": {
+                "USE_CRT": "ON",
+                "SHOW_CONSOLE": "ON",
+                "CMAKE_C_COMPILER": "clang-cl",
+                "CMAKE_CXX_COMPILER": "clang-cl",
+                "CMAKE_LINKER": "lld-link",
+                "CMAKE_BUILD_TYPE": "Debug"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "debug-crt",
+            "configurePreset": "debug-crt"
+        },
+        {
+            "name": "debug",
+            "configurePreset": "debug"
+        },
+        {
+            "name": "release",
+            "configurePreset": "release"
+        }
+    ]
+}
