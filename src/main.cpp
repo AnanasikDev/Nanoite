@@ -616,6 +616,110 @@ private:
     Timer timer;
 };
 
+struct Input
+{
+    enum class KeyState : unsigned char
+    {
+        Idle = 1,
+        Press = 1 << 1,
+        Hold = 1 << 2,
+        Release = 1 << 3,
+        Down = Press | Hold,
+        Up = Release | Idle
+    };
+
+    enum class Key : short
+    {
+        NONE = 0,
+
+        LeftMouseButton     = VK_LBUTTON,
+        RightMouseButton    = VK_RBUTTON,
+        MiddleMouseButton   = VK_MBUTTON,
+        
+        Shift = VK_SHIFT,
+        Control = VK_CONTROL,
+        
+        Tab   = VK_TAB,
+        Return = VK_RETURN,
+        Escape = VK_ESCAPE,
+        Space = VK_SPACE,
+        End = VK_END,
+        Home = VK_HOME,
+
+        ArrowLeft = VK_LEFT,
+        ArrowUp = VK_UP,
+        ArrowRight = VK_RIGHT,
+        ArrowDown = VK_DOWN
+    };
+    
+    static inline constexpr int MAX = VK_F24;
+    
+    KeyState states[MAX];
+    
+    inline bool is_key_down(Key key) const
+    {
+        return static_cast<int>(states[static_cast<int>(key)]) & static_cast<int>(KeyState::Down);
+    }
+
+    inline bool is_key_up(Key key) const
+    {
+        return static_cast<int>(states[static_cast<int>(key)]) & static_cast<int>(KeyState::Up);
+    }
+
+    inline bool is_key_pressed(Key key) const
+    {
+        return static_cast<int>(states[static_cast<int>(key)]) & static_cast<int>(KeyState::Press);
+    }
+
+    inline bool is_key_released(Key key) const
+    {
+        return static_cast<int>(states[static_cast<int>(key)]) & static_cast<int>(KeyState::Release);
+    }
+
+    inline bool is_key_held(Key key) const
+    {
+        return static_cast<int>(states[static_cast<int>(key)]) & static_cast<int>(KeyState::Hold);
+    }
+
+    inline bool is_key_idle(Key key) const
+    {
+        return static_cast<int>(states[static_cast<int>(key)]) & static_cast<int>(KeyState::Idle);
+    }
+
+    Input(){
+        for (int k = 0; k < MAX; ++k)
+        {
+            states[k] = KeyState::Idle;
+        }
+    }
+
+    void tick()
+    {
+        for (int k = 1; k < MAX; ++k)
+        {
+            short raw = GetKeyState(k) + 128;
+            bool is_down = !(raw & 128);
+            Key key = static_cast<Key>(k);
+            if (is_key_down(key) && is_down)
+            {
+                states[k] = KeyState::Hold;
+            }
+            else if (is_key_down(key) && !is_down)
+            {
+                states[k] = KeyState::Release;
+            }
+            else if (is_key_up(key) && is_down)
+            {
+                states[k] = KeyState::Press;
+            }
+            else if (is_key_up(key) && !is_down)
+            {
+                states[k] = KeyState::Idle;
+            }
+        }
+    }
+};
+
 constexpr nem::float2 WINDOW_SIZE { 1280, 720 };
 constexpr nem::float2 WINDOW_RATIO { 1.0f, WINDOW_SIZE.x / WINDOW_SIZE.y };
 
@@ -629,6 +733,8 @@ extern "C" void __stdcall _main()
     memory.init();
     Level level;
     level.Init();
+
+    Input input;
 
     debug_print_region(memory.pool.start, "pool");
     level.Cleanup();
@@ -771,6 +877,7 @@ extern "C" void __stdcall _main()
     while (running)
     {
         delta_time = clock.tick();
+        input.tick();
 
         while (PeekMessageA(&msg, 0, 0, 0, PM_REMOVE))
         {
@@ -802,66 +909,17 @@ extern "C" void __stdcall _main()
         glBindVertexArray(VAO);
         glDrawArrays(GL_TRIANGLES, 0, 3);
 
-        // printf(time);
-        // prints("\n");
-
-        static int prev_key = 0;
-        static bool key_down = false;
+        if (input.is_key_pressed(Input::Key::LeftMouseButton)){
+            prints("Press!\n");
+        }
         
-        short key = GetKeyState(VK_LBUTTON);
-        key += 128;
-        // print_bin(key, false); prints();
-        bool new_key_down = (key & 255);
-        //if (key_down && !new_key_down)
-        //{
-        //    prints("Release");
-        //    prints();
-        //}
-        //if (!key_down && new_key_down)
-        //{
-        //    prints("Click");
-        //    prints();
-        //}
-        //if (key_down)
-        //{
-        //    prints("Down");
-        //    prints();
-        //}
-        //if (!key_down)
-        //{
-        //    prints("Up");
-        //    prints();
-        //}
-        //key_down = new_key_down;
+        if (input.is_key_released(Input::Key::LeftMouseButton)){
+            prints("Release!\n");
+        }
 
-        // if (prev_key & 1 && !(key & 1))
-        // {
-        //     prints("Click");
-        //     prints();
-        // }
-        // if (key & 1 && !(prev_key & 1))
-        // {
-        //     prints("Release");
-        //     prints();
-        // }
-
-        // if (key_down)
-        // {
-        //     prints("Click");
-        //     prints();
-        // }
-        // if (key & 1 && !(prev_key & 1))
-        // {
-        //     prints("Release");
-        //     prints();
-        // }
-        
-        prev_key = key;
-
-        // if (!(key & 255))
-        // {
-        //     prints("Down\n");
-        // }
+        if (input.is_key_pressed(Input::Key::Space)){
+            prints("Jump!\n");
+        }
 
         if (time > nem::TWO_PI<float>){
             midiOutShortMsg(midihandle, message.word); //0x209035C0
@@ -870,9 +928,9 @@ extern "C" void __stdcall _main()
 
         SwapBuffers(dc);
 
-        prints("delta time: ");
-        printf(delta_time);
-        prints();
+        //prints("delta time: ");
+        //printf(delta_time);
+        //prints();
         time += delta_time;
     }
 
