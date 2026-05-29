@@ -6,6 +6,8 @@
 #include "glf.h"
 #include <mmeapi.h>
 #include <mmsystem.h>
+#include "nem.hpp"
+#include "trig.hpp"
 
 extern "C" int _fltused = 0;
 
@@ -25,13 +27,25 @@ extern "C" void* memcpy(void* dst, const void* src, size_t n)
     return dst;
 }
 
-void prints(const char* s)
+void print_str(const char* s)
 {
     HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
     DWORD written;
     int len = 0;
     while (s[len]) len++;
     WriteFile(out, s, len, &written, 0);
+}
+
+void prints(const char* s = nullptr)
+{
+    if (s == nullptr)
+    {
+        print_str("\n");
+    }
+    else
+    {
+        print_str(s);
+    }
 }
 
 #if USE_CRT
@@ -94,26 +108,142 @@ void float_to_str(char* out, float arg, int precision)
         arg = -arg;
     }
     int whole = static_cast<int>(arg);
-    int digits = 1;
+    int factor = 1;
     for (int i = 0; i < precision; i++){
-        digits *= 10;
+        factor *= 10;
     }
-    int floating = static_cast<int>((arg - whole) * digits);
+    double floating_float = (arg - whole);
+    int floating_int = static_cast<int>(floating_float * factor);
+    int first_zeros = 0;
+    {
+        double scaled = floating_float * 10; // 0.1 should count as 0 zeros after .
+        for (int i = 0; i < precision; ++i){
+            double truncated = static_cast<int>(scaled) + 1e-7;
+            if (static_cast<int>(truncated) >= 1){
+                // found first non-zero
+                break;
+            }
+            ++first_zeros;
+            scaled *= 10;
+        }
+    }
+
+    for (int i = 0; i < precision; i++){
+        if (floating_int % 10 == 0){
+            floating_int /= 10;
+        }
+    }
+
     if (neg){
         *out = '-';
         ++out;
     }
     int_to_str(out, whole);
     out += digits_b10(whole);
-    int_to_str(out, floating);
-    out += digits;
+    *out = '.';
+    out++;
+    for (int z = 0; z < first_zeros; ++z){
+        *out = '0';
+        out++;
+    }
+    int_to_str(out, floating_int);
+    // 0.000290f, 6 digit precision
+    //  .000290f * 10e6 = 290.0 
 }
 
-template <int WholeDigits = 9, int FloatingDigits = 5>
-void printf(float arg, int precision = 2)
+template <int WholeDigits = 9, int FloatingDigits = 6>
+void printf(float arg, int precision = 6)
 {
+    if (nem::_nem_isnan(arg)){
+        prints("NaN");
+        return;
+    }
+    if (!nem::_nem_isfinite(arg)){
+        prints("INF");
+        return;
+    }
     char s[1 + WholeDigits + 1 + FloatingDigits];
     float_to_str(s, arg, precision);
+    prints(s);
+}
+
+char hex_digit_to_char(char digit)
+{
+    if (digit < 10)
+    {
+        return '0' + digit;
+    }
+    else
+    {
+        return 'A' + digit - 10;
+    }
+}
+
+void hex_to_str(char* out, int arg)
+{
+    for (int chk = 0; chk < 32/4; ++chk)
+    {
+        int digit = arg & (0xF);
+        *(out + 8 - chk - 1) = hex_digit_to_char(digit);
+        arg >>= 4;
+    }
+    out[8] = 0;
+}
+
+void print_hex(int arg)
+{
+    char buf[9];
+    hex_to_str(buf, arg);
+    prints(buf);
+}
+
+int count_bin_length(int arg, bool ignore_trailing = true)
+{
+    if (!ignore_trailing)
+    {
+        return 32;
+    }
+
+    bool found_non_zero = false;
+    int length = 0;
+    for (int chk = 0; chk < 32; ++chk)
+    {
+        int digit = arg & 1;
+        arg >>= 1;
+
+        if (digit == 0)
+        {
+            ++length;
+            continue;
+        }
+
+        length = 0;
+    }
+    if (length == 32)
+    {
+        length = 31; // 0 has to be represented with 1 digit
+    }
+    return 32 - length;
+}
+
+void bin_to_str(char* out, int arg, bool ignore_trailing = true)
+{
+    bool found_non_zero = false;
+    int length = count_bin_length(arg, ignore_trailing);
+    for (int chk = 32 - length; chk < 32; ++chk)
+    {
+        int digit = arg & 1;
+        *(out + 32 - chk - 1) = hex_digit_to_char(digit);
+        arg >>= 1;
+    }
+    out[length] = 0;
+}
+
+void print_bin(int arg, bool ignore_trailing = true)
+{
+    char buf[33];
+    bin_to_str(buf, arg, ignore_trailing);
+    prints(buf);
 }
 
 float my_sqrtf(float x)
@@ -136,16 +266,236 @@ LRESULT CALLBACK WinEventLoop(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     return DefWindowProc(hwnd, msg, wParam, lParam);
 }
 
-class Arena
+void* alloc(int size)
 {
-    void* start;
+    return VirtualAlloc(NULL, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+}
+
+bool dealloc(void* ptr, int size)
+{
+    return VirtualFree(ptr, 0, MEM_RELEASE); // 0 because of MEM_RELEASE
+}
+
+struct Header
+{
+    Header* next = nullptr;
+    void* ptr = nullptr; // object to destroy
+    void (*func)(void*) = nullptr; // destructor function delegate
 };
 
-template <typename T>
-T* memreq(int size)
+#ifndef __PLACEMENT_NEW_INLINE
+#define __PLACEMENT_NEW_INLINE
+void* operator new(size_t, void* ptr) noexcept   { return ptr; }
+void  operator delete(void*, void*) noexcept    { }
+#endif
+
+template<typename T>
+void destroy(void* object)
 {
-    return (T*)VirtualAlloc(NULL, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    reinterpret_cast<T*>(object)->~T();
 }
+
+struct Arena
+{
+    Header* head = nullptr;
+    char* start = nullptr;
+    int size = 0;
+
+    void init(char* _start, int _size)
+    {
+        start = _start;
+        size = _size;
+        free = _start;
+    }
+
+    constexpr bool is_empty() const
+    {
+        return size == 0;
+    }
+
+    char* reserve(int amount)
+    {   
+        char* new_free = free + amount; // new pointer to the first free byte
+        if (new_free >= start + size) // >=?
+        {
+            return nullptr;
+        }
+        char* result = free;
+        free = new_free;
+        return result;
+    }
+
+    template <typename T>
+    T* get()
+    {
+        const int size = sizeof(Header) + sizeof(T);
+        char* ptr = (char*)reserve(size);
+        T* obj_ptr = (T*)(ptr + sizeof(Header));
+        Header* header_ptr = (Header*)ptr;
+        header_ptr->ptr = obj_ptr;
+        header_ptr->func = destroy<T>;
+        
+        new (obj_ptr) T();
+        if (head == nullptr)
+        {
+            head = header_ptr;
+        }
+        else
+        {
+            header_ptr->next = head;
+            head = header_ptr;
+        }
+        return obj_ptr;
+    }
+
+    ~Arena()
+    {
+        while (head != nullptr)
+        {
+            head->func(head->ptr);
+            head = head->next;
+        }
+        start = nullptr;
+        size = 0;
+        head = nullptr;
+        free = start;
+    }
+
+private:
+    char* free = start; // pointer to the first free byte
+};
+
+void debug_print_region(void* ptr, const char* label)
+{
+    MEMORY_BASIC_INFORMATION mbi;
+    VirtualQuery(ptr, &mbi, sizeof(mbi));
+
+    prints(label);
+    prints("  base: ");
+    print_hex((size_t)mbi.BaseAddress);
+    prints("  size: ");
+    printi((int)mbi.RegionSize);
+    prints("  state: ");
+    if (mbi.State == MEM_COMMIT)       prints("COMMITTED");
+    else if (mbi.State == MEM_RESERVE) prints("RESERVED");
+    else if (mbi.State == MEM_FREE)    prints("FREE");
+    prints("\n");
+}
+
+class Memory
+{
+public:
+
+    static constexpr int INIT_SIZE = 100000;
+    static constexpr int INIT_ARENAS_COUNT = 10;
+
+    int capacity = 0;
+    int arenas_count = 0;
+    
+    Arena pool;
+    Arena arenas[INIT_ARENAS_COUNT];
+    
+public:
+    static Memory* instance;
+
+    void init()
+    {
+        instance = this;
+        pool.init((char*)alloc(INIT_SIZE), INIT_SIZE);
+
+        capacity = INIT_SIZE;
+        arenas_count = INIT_ARENAS_COUNT;
+    }
+
+    void clean()
+    {
+        if (pool.start != nullptr)
+        {
+            for (int i = 0; i < arenas_count; ++i)
+            {
+                arenas[i].~Arena();
+            }
+
+            dealloc(pool.start, pool.size);
+        }
+    }
+    
+    Arena* get_arena(int size)
+    {
+        char* start = pool.start;
+        char* cursor = start;
+        Arena* result = nullptr;
+        for (int i = 0; i < arenas_count; ++i)
+        {
+            Arena& found = arenas[i];
+            
+            if ((cursor - start) + size >= capacity)
+            {
+                return nullptr;
+            }
+
+            if (!found.is_empty())
+            {
+                cursor = found.start + found.size;
+                continue;
+            }
+
+            if (i == arenas_count - 1)
+            {
+                found.init(cursor, size);
+                return &found;
+            }
+
+            Arena& next = arenas[i + 1];
+            if (next.is_empty() || cursor + size <= next.start)
+            {
+                found.init(cursor, size);
+                return &found;
+            }
+        }
+        return nullptr;
+    }
+
+    void free_arena(Arena* arena)
+    {
+        arena->~Arena();
+    }
+};
+
+Memory* Memory::instance = nullptr;
+
+struct Enemy{
+    Enemy(){
+        prints("Enemy created\n");
+    }
+
+    ~Enemy(){
+        prints("Enemy deleted\n");
+    }
+};
+
+static Memory* mem()
+{
+    return Memory::instance;
+}
+
+class Level{
+    Arena* m_arena = nullptr;
+    Enemy* m_enemy = nullptr;
+
+public:
+
+    void Init(){
+        m_arena = mem()->get_arena(4000);
+        m_enemy = m_arena->get<Enemy>();
+    }
+
+    void Cleanup(){
+        if (m_arena != nullptr){
+            mem()->free_arena(m_arena);
+        }
+    }
+};
 
 struct File
 {
@@ -205,6 +555,69 @@ public:
     }
 };
 
+struct Timer
+{
+    Timer()
+    {
+        QueryPerformanceFrequency(&Frequency); 
+    }
+
+    void reset()
+    {
+        StartingTime.QuadPart = 0;
+        EndingTime.QuadPart = 0;
+        QueryPerformanceCounter(&StartingTime);
+    }
+    
+    double elapsed_seconds()
+    {
+        QueryPerformanceCounter(&EndingTime);
+        LONGLONG delta = EndingTime.QuadPart - StartingTime.QuadPart;
+        return double(delta) / Frequency.QuadPart;
+    }
+
+private:
+    LARGE_INTEGER StartingTime;
+    LARGE_INTEGER EndingTime;
+    LARGE_INTEGER Frequency;
+};
+
+struct Clock
+{
+    Clock()
+    {
+        timer.reset();
+    }
+
+    void init(float target_fps)
+    {
+        target_delta_time = 1.0f / target_fps;
+    }
+
+    double tick()
+    {
+        timer.reset();
+        double delta_time = timer.elapsed_seconds();
+        float to_go = target_delta_time - delta_time;
+        while (to_go > 0.0)
+        {
+            if (to_go > 0.001)
+            {
+                Sleep(1);
+            }
+            delta_time = timer.elapsed_seconds();
+            to_go = target_delta_time - delta_time;
+        }
+        return delta_time;
+    }
+
+private:
+    float target_delta_time = 0.015f;
+    Timer timer;
+};
+
+constexpr nem::float2 WINDOW_SIZE { 1280, 720 };
+constexpr nem::float2 WINDOW_RATIO { 1.0f, WINDOW_SIZE.x / WINDOW_SIZE.y };
 
 #if USE_CRT
 int main()
@@ -212,47 +625,28 @@ int main()
 extern "C" void __stdcall _main()
 #endif
 {
+    Memory memory;
+    memory.init();
+    Level level;
+    level.Init();
+
+    debug_print_region(memory.pool.start, "pool");
+    level.Cleanup();
+
+    prints("My float: ");
+    prints(" 1e-2:  "); printf(1e-2f); prints();
+    prints(" 1e-3:  "); printf(1e-3f); prints();
+    prints(" 1e-4:  "); printf(1e-4f); prints();
+    prints(" 1e-5:  "); printf(1e-5f); prints();
+    prints(" 1e-6:  "); printf(1e-6f); prints();
+
+
     char DataBuffer[45] = "New world";
     FileSystem fs;
 
     File file = fs.open("whatevever.txt");
     fs.write(file, DataBuffer, sizeof(DataBuffer));
     fs.close(file);
-
-    volatile float m = 0.2f;
-    volatile float sss = my_sqrtf(m);
-
-    printi(-10);
-    prints("\n");
-    printi(10);
-    prints("\n");
-    printf(-0.8f);
-    prints("\n");
-    printf(0.8f);
-    prints("\n");
-    printf(-1.1f);
-    prints("\n");
-    printf(1.1f);
-    prints("\n");
-
-    int* a = memreq<int>(2 * sizeof(int));
-    a[0] = 2;
-    a[1] = 4;
-    a[1023] = 8;
-    // a[1024] = 8; will give error since more than allocated page
-    // a[4096] = 9;
-
-    volatile float x = a[1] + a[0];
-    volatile float y = (x);
-    (void)y;
-    //printf("HEllo from CRT\n");
-    //print("Hello!\n");
-    //print(12344);
-    __print("Hello? %.2f\n", sss);
-    __print("Digits in 123456 %d", digits_b10(123456));
-    prints("\n\n");
-    printi(123);
-    prints("\n\n");
 
     // Create window
     WNDCLASSA wc = {};
@@ -263,7 +657,7 @@ extern "C" void __stdcall _main()
 
     HWND hwnd = CreateWindowExA(
         0, "g", "game", WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-        CW_USEDEFAULT, CW_USEDEFAULT, 1280, 720,
+        CW_USEDEFAULT, CW_USEDEFAULT, (int)WINDOW_SIZE.x, (int)WINDOW_SIZE.y,
         0, 0, wc.hInstance, 0
     );
 
@@ -281,7 +675,7 @@ extern "C" void __stdcall _main()
     gl_load_functions();
 
     float vertices[] = {
-        -sss, -0.5f, 0.0f,
+        -0.4f, -0.5f, 0.0f,
          0.5f, -0.5f, 0.0f,
          0.0f,  0.5f, 0.0f
     };
@@ -350,28 +744,34 @@ extern "C" void __stdcall _main()
     message.data[2] = 100;   // MIDI note-on message: Key velocity (100 = loud)
     message.data[3] = 0;     // Unused parameter
 
-    __print("MIDI output port set to %d.\n", midiport);
+   // __print("MIDI output port set to %d.\n", midiport);
 
     HMIDIOUT midihandle;
     MMRESULT midirsult = midiOutOpen(&midihandle, midiport, 0, 0, CALLBACK_NULL);
     if (midirsult == 0)
     {
-        __print("midi initialized\n");
+        //__print("midi initialized\n");
     }
     else
     {
-        __print("midi failed\n");
+        //__print("midi failed\n");
     }
 
     midiOutShortMsg(midihandle, message.word); //0x209035C0
+
+    Clock clock;
+    clock.init(60);
 
     // Main loop
     MSG msg;
     bool running = true;
     float time = 0;
+    float delta_time = 0.f;
+    float angle = 0.f;
     while (running)
     {
-        time += 0.01f;
+        delta_time = clock.tick();
+
         while (PeekMessageA(&msg, 0, 0, 0, PM_REMOVE))
         {
             if (msg.message == WM_QUIT){
@@ -386,7 +786,16 @@ extern "C" void __stdcall _main()
         glClear(GL_COLOR_BUFFER_BIT);
 
         glBindVertexArray(VAO);
-        vertices[0] = my_sqrtf(time);
+        float speed = 1.0f * delta_time;
+        float scale = 0.4f;
+        angle += speed;
+        vertices[0]     = scale * nem::sin<float>(angle) * WINDOW_RATIO.x;
+        vertices[1]     = scale * nem::cos<float>(angle) * WINDOW_RATIO.y;
+        vertices[0 + 3] = scale * nem::sin<float>(angle + nem::PI<float> * 2.f/3.f)  * WINDOW_RATIO.x;
+        vertices[1 + 3] = scale * nem::cos<float>(angle + nem::PI<float> * 2.f/3.f)  * WINDOW_RATIO.y;
+        vertices[0 + 6] = scale * nem::sin<float>(angle + nem::PI<float> * 4.f/3.f)  * WINDOW_RATIO.x;
+        vertices[1 + 6] = scale * nem::cos<float>(angle + nem::PI<float> * 4.f/3.f)  * WINDOW_RATIO.y;
+
         glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_DYNAMIC_DRAW);
 
         glUseProgram(shaderProgram);
@@ -395,14 +804,79 @@ extern "C" void __stdcall _main()
 
         // printf(time);
         // prints("\n");
+
+        static int prev_key = 0;
+        static bool key_down = false;
         
-        if (time > 2.0f){
+        short key = GetKeyState(VK_LBUTTON);
+        key += 128;
+        // print_bin(key, false); prints();
+        bool new_key_down = (key & 255);
+        //if (key_down && !new_key_down)
+        //{
+        //    prints("Release");
+        //    prints();
+        //}
+        //if (!key_down && new_key_down)
+        //{
+        //    prints("Click");
+        //    prints();
+        //}
+        //if (key_down)
+        //{
+        //    prints("Down");
+        //    prints();
+        //}
+        //if (!key_down)
+        //{
+        //    prints("Up");
+        //    prints();
+        //}
+        //key_down = new_key_down;
+
+        // if (prev_key & 1 && !(key & 1))
+        // {
+        //     prints("Click");
+        //     prints();
+        // }
+        // if (key & 1 && !(prev_key & 1))
+        // {
+        //     prints("Release");
+        //     prints();
+        // }
+
+        // if (key_down)
+        // {
+        //     prints("Click");
+        //     prints();
+        // }
+        // if (key & 1 && !(prev_key & 1))
+        // {
+        //     prints("Release");
+        //     prints();
+        // }
+        
+        prev_key = key;
+
+        // if (!(key & 255))
+        // {
+        //     prints("Down\n");
+        // }
+
+        if (time > nem::TWO_PI<float>){
             midiOutShortMsg(midihandle, message.word); //0x209035C0
             time = 0;
         }
 
         SwapBuffers(dc);
+
+        prints("delta time: ");
+        printf(delta_time);
+        prints();
+        time += delta_time;
     }
+
+    memory.clean();
 
     midiOutReset(midihandle);
     midiOutClose(midihandle);

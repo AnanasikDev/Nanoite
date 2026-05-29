@@ -9,3 +9,7 @@ _deps/
 .cmake/
 
 *.exe
+*.map
+*.pdb
+*.dll
+*.lib
