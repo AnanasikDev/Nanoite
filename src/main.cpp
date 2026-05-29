@@ -251,21 +251,6 @@ float my_sqrtf(float x)
     return __builtin_sqrtf(x);// __builtin_sqrtf(x);
 }
 
-LRESULT CALLBACK WinEventLoop(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam){
-    switch (msg){
-        case WM_CLOSE:
-            // if (MessageBox(hwnd, "Really quit?", "My application", MB_OKCANCEL) == IDOK)
-            {
-                DestroyWindow(hwnd);
-            }
-            return 0;
-        case WM_DESTROY:
-            PostQuitMessage(0);
-            return 0;
-    }
-    return DefWindowProc(hwnd, msg, wParam, lParam);
-}
-
 void* alloc(int size)
 {
     return VirtualAlloc(NULL, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
@@ -463,6 +448,101 @@ public:
 };
 
 Memory* Memory::instance = nullptr;
+
+LRESULT CALLBACK WinEventLoop(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
+
+class Window
+{
+public:
+    nem::int2 current_size;
+    nem::float2 aspect_ratio {1.0f, 1.0f};
+
+    static Window* instance;
+
+    Window()
+    {
+        instance = this;
+
+        // Create window
+        WNDCLASSA wc = {};
+        wc.lpfnWndProc = WinEventLoop;
+        wc.hInstance = GetModuleHandleA(0);
+        wc.lpszClassName = "g";
+        RegisterClassA(&wc);
+
+        handle = CreateWindowExA(
+            0, "g", "game", WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+            CW_USEDEFAULT, CW_USEDEFAULT, (int)INITIAL_SIZE.x, (int)INITIAL_SIZE.y,
+            0, 0, wc.hInstance, 0
+        );
+
+        // Set up OpenGL
+        dc = GetDC(handle);
+        PIXELFORMATDESCRIPTOR pfd = {};
+        pfd.nSize = sizeof(pfd);
+        pfd.nVersion = 1;
+        pfd.dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
+        pfd.cColorBits = 32;
+        pfd.cDepthBits = 24;
+        SetPixelFormat(dc, ChoosePixelFormat(dc, &pfd), &pfd);
+        wglMakeCurrent(dc, wglCreateContext(dc));
+
+        current_size = INITIAL_SIZE;
+    }
+
+    void begin_frame()
+    {
+         while (PeekMessageA(&msg, 0, 0, 0, PM_REMOVE))
+        {
+            if (msg.message == WM_QUIT){
+                running = false;
+                break;
+            }
+            TranslateMessage(&msg);
+            DispatchMessageA(&msg);
+        }
+    }
+
+    void end_frame()
+    {
+        SwapBuffers(dc);
+    }
+
+    inline bool is_running() const
+    {
+        return running;
+    }
+
+private:
+    inline static constexpr nem::int2 INITIAL_SIZE = { 1280, 720 };
+    HWND handle;
+    MSG msg;
+    HDC dc;
+    bool running = true;
+
+public:
+    LRESULT CALLBACK poll_events(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        switch (msg){
+            case WM_CLOSE:
+                //if (MessageBox(hwnd, "Really quit?", "My application", MB_OKCANCEL) == IDOK)
+                {
+                    DestroyWindow(hwnd);
+                }
+                return 0;
+            case WM_DESTROY:
+                PostQuitMessage(0);
+                return 0;
+    }
+    return DefWindowProc(hwnd, msg, wParam, lParam);
+}
+};
+
+Window* Window::instance = nullptr;
+
+LRESULT CALLBACK WinEventLoop(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam){
+    return Window::instance->poll_events(hwnd, msg, wParam, lParam);
+}
 
 struct Enemy{
     Enemy(){
@@ -720,6 +800,78 @@ struct Input
     }
 };
 
+struct Music
+{
+    Music(){
+        MMRESULT midirsult = midiOutOpen(&midihandle, 0, 0, 0, CALLBACK_NULL);
+        if (midirsult == 0)
+        {
+            prints("midi initialized\n");
+        }
+        else
+        {
+            prints("midi failed\n");
+        }
+        timer.reset();
+    }
+
+    enum class Note
+    {
+        A0 = 21,
+        ASharp0, B0, C1, CSharp1, D1, DSharp1, E1, F1, FSharp1, G1, GSharp1, A1,
+        ASharp1, B1, C2, CSharp2, D2, DSharp2, E2, F2, FSharp2, G2, GSharp2, A2,
+        ASharp2, B2, C3, CSharp3, D3, DSharp3, E3, F3, FSharp3, G3, GSharp3, A3,
+        ASharp3, B3, C4, CSharp4, D4, DSharp4, E4, F4, FSharp4, G4, GSharp4, A4,
+        ASharp4, B4, C5, CSharp5, D5, DSharp5, E5, F5, FSharp5, G5, GSharp5, A5,
+        ASharp5, B5, C6, CSharp6, D6, DSharp6, E6, F6, FSharp6, G6, GSharp6, A6,
+        ASharp6, B6, C7, CSharp7, D7, DSharp7, E7, F7, FSharp7, G7, GSharp7, A7,
+        ASharp7, B7, C8, CSharp8, D8, DSharp8, E8, F8, FSharp8, G8, GSharp8, A8,
+        ASharp8, B8, C9, CSharp9, D9, DSharp9, E9, F9, FSharp9, G9, GSharp9
+    };
+
+    void play(Note note, int velocity = 100){
+        union { unsigned long word; unsigned char data[4]; } message;
+        message.data[0] = 0x90;
+        message.data[1] = static_cast<int>(note);
+        message.data[2] = velocity;
+        message.data[3] = 0;     // Unused parameter
+        impl_play_short(message.word);
+    }
+
+    void repeat_sequence(Note* notes, int num, float interval_seconds)
+    {
+        if (timer.elapsed_seconds() < interval_seconds)
+        {
+            return;
+        }
+        
+        timer.reset();
+
+        play(notes[seq_index]);
+        ++seq_index;
+
+        if (seq_index == num - 1){
+            seq_index = 0;
+        }
+    }
+
+    void clean()
+    {
+        midiOutReset(midihandle);
+        midiOutClose(midihandle);
+    }
+
+private:
+    HMIDIOUT midihandle;
+    Timer timer;
+    int seq_index = 0;
+
+    void impl_play_short(int message)
+    {
+        midiOutShortMsg(midihandle, message);
+    }
+};
+
 constexpr nem::float2 WINDOW_SIZE { 1280, 720 };
 constexpr nem::float2 WINDOW_RATIO { 1.0f, WINDOW_SIZE.x / WINDOW_SIZE.y };
 
@@ -735,9 +887,12 @@ extern "C" void __stdcall _main()
     level.Init();
 
     Input input;
+    Window window;
 
     debug_print_region(memory.pool.start, "pool");
     level.Cleanup();
+
+    Music music;
 
     prints("My float: ");
     prints(" 1e-2:  "); printf(1e-2f); prints();
@@ -754,29 +909,7 @@ extern "C" void __stdcall _main()
     fs.write(file, DataBuffer, sizeof(DataBuffer));
     fs.close(file);
 
-    // Create window
-    WNDCLASSA wc = {};
-    wc.lpfnWndProc = WinEventLoop;
-    wc.hInstance = GetModuleHandleA(0);
-    wc.lpszClassName = "g";
-    RegisterClassA(&wc);
-
-    HWND hwnd = CreateWindowExA(
-        0, "g", "game", WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-        CW_USEDEFAULT, CW_USEDEFAULT, (int)WINDOW_SIZE.x, (int)WINDOW_SIZE.y,
-        0, 0, wc.hInstance, 0
-    );
-
-    // Set up OpenGL
-    HDC dc = GetDC(hwnd);
-    PIXELFORMATDESCRIPTOR pfd = {};
-    pfd.nSize = sizeof(pfd);
-    pfd.nVersion = 1;
-    pfd.dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
-    pfd.cColorBits = 32;
-    pfd.cDepthBits = 24;
-    SetPixelFormat(dc, ChoosePixelFormat(dc, &pfd), &pfd);
-    wglMakeCurrent(dc, wglCreateContext(dc));
+    
 
     gl_load_functions();
 
@@ -832,62 +965,21 @@ extern "C" void __stdcall _main()
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
     glEnableVertexAttribArray(0);
 
-    int ckey;           // storage for the current keyboard key being pressed
-    int notestate = 0;  // keeping track of when the note is on or off
-    int velocity = 100; // MIDI note velocity parameter value
-    int midiport = 0;   // select which MIDI output port to open
-    int flag;           // monitor the status of returning functions
-    HMIDIOUT device;    // MIDI device interface for sending MIDI output
-
-    // variable which is both an integer and an array of characters:
-    union { unsigned long word; unsigned char data[4]; } message;
-    // message.data[0] = command byte of the MIDI message, for example: 0x90
-    // message.data[1] = first data byte of the MIDI message, for example: 60
-    // message.data[2] = second data byte of the MIDI message, for example 100
-    // message.data[3] = not used for any MIDI messages, so set to 0
-    message.data[0] = 0x90;  // MIDI note-on message (requires to data bytes)
-    message.data[1] = 60;    // MIDI note-on message: Key number (60 = middle C)
-    message.data[2] = 100;   // MIDI note-on message: Key velocity (100 = loud)
-    message.data[3] = 0;     // Unused parameter
-
-   // __print("MIDI output port set to %d.\n", midiport);
-
-    HMIDIOUT midihandle;
-    MMRESULT midirsult = midiOutOpen(&midihandle, midiport, 0, 0, CALLBACK_NULL);
-    if (midirsult == 0)
-    {
-        //__print("midi initialized\n");
-    }
-    else
-    {
-        //__print("midi failed\n");
-    }
-
-    midiOutShortMsg(midihandle, message.word); //0x209035C0
-
     Clock clock;
     clock.init(60);
 
+    Music::Note notes[5] = { Music::Note::A4, Music::Note::E8, Music::Note::G2, Music::Note::F3, Music::Note::DSharp1 };
+
     // Main loop
-    MSG msg;
-    bool running = true;
     float time = 0;
     float delta_time = 0.f;
     float angle = 0.f;
-    while (running)
+    while (window.is_running())
     {
         delta_time = clock.tick();
         input.tick();
 
-        while (PeekMessageA(&msg, 0, 0, 0, PM_REMOVE))
-        {
-            if (msg.message == WM_QUIT){
-                running = false;
-                break;
-            }
-            TranslateMessage(&msg);
-            DispatchMessageA(&msg);
-        }
+        window.begin_frame();
 
         glClearColor(0.2f, 0.1f, 0.3f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
@@ -919,25 +1011,26 @@ extern "C" void __stdcall _main()
 
         if (input.is_key_pressed(Input::Key::Space)){
             prints("Jump!\n");
+            music.play(Music::Note::ASharp1);
         }
 
         if (time > nem::TWO_PI<float>){
-            midiOutShortMsg(midihandle, message.word); //0x209035C0
             time = 0;
         }
 
-        SwapBuffers(dc);
+        music.repeat_sequence(notes, 5, 0.4f);
 
-        //prints("delta time: ");
-        //printf(delta_time);
-        //prints();
+        window.end_frame();
+
+        prints("delta time: ");
+        printf(delta_time);
+        prints();
         time += delta_time;
     }
 
     memory.clean();
 
-    midiOutReset(midihandle);
-    midiOutClose(midihandle);
+    music.clean();    
 
     ExitProcess(0);
 }
