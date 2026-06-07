@@ -16,7 +16,7 @@ include(FetchContent)
 FetchContent_Declare(
     nem
     GIT_REPOSITORY https://github.com/AnanasikDev/Not-Enough-Math.git
-    GIT_TAG main
+    GIT_TAG 6ea5c2
 )
 
 set(NEM_BUILD_TESTS OFF CACHE BOOL "" FORCE)

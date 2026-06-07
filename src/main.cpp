@@ -9,7 +9,18 @@
 #include "nem.hpp"
 #include "trig.hpp"
 
+#ifdef min
+#undef min
+#endif
+
+#ifdef max
+#undef max
+#endif
+
 extern "C" int _fltused = 0;
+
+    static constexpr char PATTERN_CLEAN = 0xCD;
+
 
 // Provide memset/memcpy since the compiler may emit calls to them
 extern "C" void* memset(void* dst, int val, size_t n)
@@ -154,11 +165,11 @@ void float_to_str(char* out, float arg, int precision)
 template <int WholeDigits = 9, int FloatingDigits = 6>
 void printf(float arg, int precision = 6)
 {
-    if (nem::_nem_isnan(arg)){
+    if (nem::is_nan(arg)){
         prints("NaN");
         return;
     }
-    if (!nem::_nem_isfinite(arg)){
+    if (nem::is_infinite(arg)){
         prints("INF");
         return;
     }
@@ -253,7 +264,9 @@ float my_sqrtf(float x)
 
 void* alloc(int size)
 {
-    return VirtualAlloc(NULL, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    void* ptr = VirtualAlloc(NULL, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    memset(ptr, PATTERN_CLEAN, size);
+    return ptr;
 }
 
 bool dealloc(void* ptr, int size)
@@ -277,6 +290,11 @@ void  operator delete(void*, void*) noexcept    { }
 template<typename T>
 void destroy(void* object)
 {
+    if (object == nullptr)
+    {
+        return;
+    }
+
     reinterpret_cast<T*>(object)->~T();
 }
 
@@ -319,6 +337,7 @@ struct Arena
         Header* header_ptr = (Header*)ptr;
         header_ptr->ptr = obj_ptr;
         header_ptr->func = destroy<T>;
+        header_ptr->next = nullptr;
         
         new (obj_ptr) T();
         if (head == nullptr)
@@ -367,12 +386,18 @@ void debug_print_region(void* ptr, const char* label)
     prints("\n");
 }
 
+template <typename T>
+struct weak_ptr
+{
+    T* ptr = nullptr;
+};
+
 class Memory
 {
 public:
 
     static constexpr int INIT_SIZE = 100000;
-    static constexpr int INIT_ARENAS_COUNT = 10;
+    static constexpr int INIT_ARENAS_COUNT = 16;
 
     int capacity = 0;
     int arenas_count = 0;
@@ -441,9 +466,23 @@ public:
         return nullptr;
     }
 
-    void free_arena(Arena* arena)
+    void extend_arena(Arena*& arena, int new_size)
+    {
+        if (new_size <= arena->size)
+        {
+            return;
+        }
+
+        Arena* new_arena = get_arena(new_size);
+        memcpy(new_arena->start, arena->start, arena->size);
+        memset(arena->start, PATTERN_CLEAN, arena->size);
+        arena = new_arena;
+    }
+
+    void free_arena(Arena*& arena)
     {
         arena->~Arena();
+        arena = nullptr;
     }
 };
 
@@ -488,6 +527,7 @@ public:
         wglMakeCurrent(dc, wglCreateContext(dc));
 
         current_size = INITIAL_SIZE;
+        aspect_ratio = { 1.0f, static_cast<float>(current_size.x) / static_cast<float>(current_size.y) };
     }
 
     void begin_frame()
@@ -519,6 +559,7 @@ private:
     MSG msg;
     HDC dc;
     bool running = true;
+    bool focused = true;
 
 public:
     LRESULT CALLBACK poll_events(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -533,6 +574,13 @@ public:
             case WM_DESTROY:
                 PostQuitMessage(0);
                 return 0;
+            case WM_SETFOCUS:
+                focused = true;
+                break;
+            case WM_KILLFOCUS:
+                focused = false;
+                break;
+
     }
     return DefWindowProc(hwnd, msg, wParam, lParam);
 }
@@ -872,8 +920,59 @@ private:
     }
 };
 
-constexpr nem::float2 WINDOW_SIZE { 1280, 720 };
-constexpr nem::float2 WINDOW_RATIO { 1.0f, WINDOW_SIZE.x / WINDOW_SIZE.y };
+template <typename T>
+struct list
+{
+    static constexpr int CAPACITY = 32;
+
+    Arena* arena = nullptr;
+
+    list(int new_capacity = CAPACITY)
+    {
+        arena = mem()->get_arena(CAPACITY);
+    }
+
+    T* push_back(T item)
+    {
+        if (arena == nullptr)
+        {
+            return nullptr;
+        }
+        // TODO: add arena extending on overflow
+        return arena->get<T>();
+    }
+
+    ~list()
+    {
+        mem()->free_arena(arena);
+    }
+};
+
+// struct AssetManager
+// {
+//     Arena* arena = nullptr;
+
+//     static AssetManager *instance;
+
+//     AssetManager()
+//     {
+//         arena = Memory::instance->get_arena(8000);
+//     }
+//     ~AssetManager()
+//     {
+//         Memory::instance->free_arena(arena);
+//     }
+// };
+
+// struct Vertex
+// {
+//     nem::float3 position;
+// };
+
+// struct Mesh
+// {
+
+// };
 
 #if USE_CRT
 int main()
@@ -901,7 +1000,6 @@ extern "C" void __stdcall _main()
     prints(" 1e-5:  "); printf(1e-5f); prints();
     prints(" 1e-6:  "); printf(1e-6f); prints();
 
-
     char DataBuffer[45] = "New world";
     FileSystem fs;
 
@@ -909,15 +1007,32 @@ extern "C" void __stdcall _main()
     fs.write(file, DataBuffer, sizeof(DataBuffer));
     fs.close(file);
 
-    
-
     gl_load_functions();
 
+    float mesh[9];
+    float scale = 0.4f;
+    mesh[0]     = scale * nem::cos<float>(0.f);
+    mesh[1]     = scale * nem::sin<float>(0.f);
+    mesh[2]     = 0.f;
+    mesh[3] = scale * nem::cos<float>(0.f + nem::PI<float> * 2.f/3.f);
+    mesh[4] = scale * nem::sin<float>(0.f + nem::PI<float> * 2.f/3.f);
+    mesh[5]     = 0.f;
+    mesh[6] = scale * nem::cos<float>(0.f + nem::PI<float> * 4.f/3.f);
+    mesh[7] = scale * nem::sin<float>(0.f + nem::PI<float> * 4.f/3.f);
+    mesh[8]     = 0.f;
+
     float vertices[] = {
-        -0.4f, -0.5f, 0.0f,
+        -0.5f, -0.5f, 0.0f,
          0.5f, -0.5f, 0.0f,
          0.0f,  0.5f, 0.0f
     };
+
+    float rad = 0.f;
+    nem::quat rotation = nem::from_axis_angle(nem::normalize(nem::float3(0, 1, 1)), rad);
+    nem::quat delta_rot = nem::from_axis_angle(nem::normalize(nem::float3(0, 1, 1)), 0.01f);
+
+    // list<float> l;
+
     unsigned int VBO;
     glGenBuffers(1, &VBO);
     glBindBuffer(GL_ARRAY_BUFFER, VBO);
@@ -968,7 +1083,8 @@ extern "C" void __stdcall _main()
     Clock clock;
     clock.init(60);
 
-    Music::Note notes[5] = { Music::Note::A4, Music::Note::E8, Music::Note::G2, Music::Note::F3, Music::Note::DSharp1 };
+    // Music::Note notes[5] = { Music::Note::A4, Music::Note::E8, Music::Note::G2, Music::Note::F3, Music::Note::DSharp1 };
+    Music::Note notes[3] = { Music::Note::C4, Music::Note::D4, Music::Note::E4 };
 
     // Main loop
     float time = 0;
@@ -988,12 +1104,25 @@ extern "C" void __stdcall _main()
         float speed = 1.0f * delta_time;
         float scale = 0.4f;
         angle += speed;
-        vertices[0]     = scale * nem::sin<float>(angle) * WINDOW_RATIO.x;
-        vertices[1]     = scale * nem::cos<float>(angle) * WINDOW_RATIO.y;
-        vertices[0 + 3] = scale * nem::sin<float>(angle + nem::PI<float> * 2.f/3.f)  * WINDOW_RATIO.x;
-        vertices[1 + 3] = scale * nem::cos<float>(angle + nem::PI<float> * 2.f/3.f)  * WINDOW_RATIO.y;
-        vertices[0 + 6] = scale * nem::sin<float>(angle + nem::PI<float> * 4.f/3.f)  * WINDOW_RATIO.x;
-        vertices[1 + 6] = scale * nem::cos<float>(angle + nem::PI<float> * 4.f/3.f)  * WINDOW_RATIO.y;
+        //vertices[0]     = scale * nem::sin<float>(angle) * window.aspect_ratio.x;
+        //vertices[1]     = scale * nem::cos<float>(angle) * window.aspect_ratio.y;
+        //vertices[0 + 3] = scale * nem::sin<float>(angle + nem::PI<float> * 2.f/3.f)  * window.aspect_ratio.x;
+        //vertices[1 + 3] = scale * nem::cos<float>(angle + nem::PI<float> * 2.f/3.f)  * window.aspect_ratio.y;
+        //vertices[0 + 6] = scale * nem::sin<float>(angle + nem::PI<float> * 4.f/3.f)  * window.aspect_ratio.x;
+        //vertices[1 + 6] = scale * nem::cos<float>(angle + nem::PI<float> * 4.f/3.f)  * window.aspect_ratio.y;
+
+        // rotation = nem::normalize(rotation * delta_rot);
+        rad += delta_time;
+        nem::quat rotation =  nem::normalize(nem::from_axis_angle(nem::normalize(nem::float3(1, 1, 1)), rad));
+        nem::mat4 transform = nem::homogenous(nem::norm_quaterion_to_rotation_matrix(rotation));
+        for (int v = 0; v < 3; ++v)
+        {
+            nem::float4 vertex(mesh[v * 3 + 0], mesh[v * 3 + 1], mesh[v * 3 + 2], 1.0f);
+            vertex = transform * vertex;
+            vertices[v * 3 + 0] = vertex[0] * window.aspect_ratio.x;
+            vertices[v * 3 + 1] = vertex[1] * window.aspect_ratio.y;
+            vertices[v * 3 + 2] = vertex[2];
+        }
 
         glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_DYNAMIC_DRAW);
 
@@ -1018,13 +1147,13 @@ extern "C" void __stdcall _main()
             time = 0;
         }
 
-        music.repeat_sequence(notes, 5, 0.4f);
+        music.repeat_sequence(notes, sizeof(notes), 0.4f);
 
         window.end_frame();
 
-        prints("delta time: ");
-        printf(delta_time);
-        prints();
+        //prints("delta time: ");
+        //printf(delta_time);
+        //prints();
         time += delta_time;
     }
 
