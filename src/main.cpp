@@ -19,8 +19,15 @@
 
 extern "C" int _fltused = 0;
 
-    static constexpr char PATTERN_CLEAN = 0xCD;
+static constexpr char PATTERN_CLEAN = 0xCD;
+static constexpr char PATTERN_DELETE = 0x1C;
+static constexpr int PAGE_SIZE = 4096;
 
+static constexpr int ceil_to_page_size(int value)
+{
+    const int floored = PAGE_SIZE * (value / PAGE_SIZE);
+    return floored + (floored < value) * PAGE_SIZE;
+}
 
 // Provide memset/memcpy since the compiler may emit calls to them
 extern "C" void* memset(void* dst, int val, size_t n)
@@ -264,6 +271,7 @@ float my_sqrtf(float x)
 
 void* alloc(int size)
 {
+    size = ceil_to_page_size(size);
     void* ptr = VirtualAlloc(NULL, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     memset(ptr, PATTERN_CLEAN, size);
     return ptr;
@@ -365,6 +373,10 @@ struct Arena
         free = start;
     }
 
+    char* begin() const { return start; }
+    char* end() const { return start + size; }
+    
+
 private:
     char* free = start; // pointer to the first free byte
 };
@@ -396,7 +408,7 @@ class Memory
 {
 public:
 
-    static constexpr int INIT_SIZE = 100000;
+    static constexpr int INIT_SIZE = 4000;
     static constexpr int INIT_ARENAS_COUNT = 16;
 
     int capacity = 0;
@@ -614,7 +626,7 @@ class Level{
 public:
 
     void Init(){
-        m_arena = mem()->get_arena(4000);
+        m_arena = mem()->get_arena(1000);
         m_enemy = m_arena->get<Enemy>();
     }
 
@@ -923,13 +935,13 @@ private:
 template <typename T>
 struct list
 {
-    static constexpr int CAPACITY = 32;
+    static constexpr int CAPACITY_BYTES = 256;
+    static constexpr int ITEM_SIZE = sizeof(T);
 
     Arena* arena = nullptr;
-
-    list(int new_capacity = CAPACITY)
+    list(int new_capacity = CAPACITY_BYTES)
     {
-        arena = mem()->get_arena(CAPACITY);
+        arena = mem()->get_arena(new_capacity);
     }
 
     T* push_back(T item)
@@ -939,14 +951,89 @@ struct list
             return nullptr;
         }
         // TODO: add arena extending on overflow
-        return arena->get<T>();
+        T* ptr = end();
+        new (ptr) T(item);
+        ++length;
+        return ptr;
+    }
+
+    void remove_at(int index)
+    {
+        T* item = get(index);
+        if (item == nullptr)
+        {
+            return; // item is invalid
+        }
+        item->~T();
+        item = nullptr;
+        for (int i = index; i < length - 1; ++i)
+        {
+            (*this)[i] = (*this)[i + 1];
+        }
+        --length;
+        memset(end(), PATTERN_DELETE, ITEM_SIZE);
+        //memset(begin(), PATTERN_DELETE, get_size_bytes());
+    }
+
+    T* begin() const
+    {
+        return (T*)arena->begin();
+    }
+
+    T* end() const
+    {
+        return (T*)(arena->begin() + ITEM_SIZE * length);
+    }
+
+    T* get(int index) const
+    {
+        if (index < 0 || index >= length)
+        {
+            return nullptr;
+        }
+        return (T*)(arena->begin() + ITEM_SIZE * index);
+    }
+
+    T& operator[](int index)
+    {
+        return *get(index);
     }
 
     ~list()
     {
         mem()->free_arena(arena);
     }
+
+    constexpr int get_length() const
+    {
+        return length;
+    }
+    
+    constexpr int get_size_bytes() const
+    {
+        return length * ITEM_SIZE;
+    }
+
+private:
+    int length = 0;
 };
+
+template <typename _T, size_t _LENGTH>
+struct array
+{
+    using ITEM_TYPE = _T;
+    static constexpr size_t ITEM_SIZE = sizeof(ITEM_TYPE);
+    static constexpr size_t LENGTH = _LENGTH;
+    static constexpr size_t SIZE = ITEM_SIZE * LENGTH;
+
+    ITEM_TYPE data[LENGTH] = {};
+
+    constexpr size_t length() const { return LENGTH; }
+    constexpr size_t size_bytes() const { return SIZE; }
+
+    constexpr ITEM_TYPE& operator[](size_t index){ return data[index]; }
+};
+
 
 // struct AssetManager
 // {
@@ -992,8 +1079,18 @@ extern "C" void __stdcall _main()
     level.Cleanup();
 
     Music music;
+    
+    array<int, 10> arr;
+    arr[0] = 4;
+    arr[9] = 5;
+    list<int> lst;
+    lst.push_back(0x01ABCDEF);
+    lst.push_back(0xFACEDEAD);
+    lst.push_back(0xFEED09AB);
 
     prints("My float: ");
+
+    lst.remove_at(1);
     prints(" 1e-2:  "); printf(1e-2f); prints();
     prints(" 1e-3:  "); printf(1e-3f); prints();
     prints(" 1e-4:  "); printf(1e-4f); prints();
